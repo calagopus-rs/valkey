@@ -1,13 +1,12 @@
-# Build and Release Valkey - build multi-arch image then extract binaries from the pushed image
 name: Build and Release Valkey
 
 on:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: "0 0 * * 0"
   workflow_dispatch:
     inputs:
       valkey_version:
-        description: 'Valkey version to build (e.g., 8.0.0). Leave empty to fetch latest.'
+        description: "Valkey version to build (e.g., 8.0.0). Leave empty to fetch latest."
         required: false
         type: string
 
@@ -88,7 +87,9 @@ jobs:
 
   export-binaries:
     name: Extract binaries from pushed images and upload artifacts
-    needs: build-and-push
+    needs:
+      - get-version
+      - build-and-push
     runs-on: ubuntu-latest
     permissions:
       contents: read
