@@ -1,3 +1,5 @@
+# Build and Release Valkey - builds inside Docker (Alpine builder) and pushes multi-arch images,
+# then extracts built binaries from the builder stage and uploads them as artifacts.
 name: Build and Release Valkey
 
 on:
@@ -80,3 +82,111 @@ jobs:
             BUILD_RDMA=0
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  export-binaries:
+    name: Export built binaries and upload artifacts
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            output_name: x86_64
+          - platform: linux/arm64
+            output_name: aarch64
+          - platform: linux/ppc64le
+            output_name: ppc64le
+          - platform: linux/s390x
+            output_name: s390x
+          - platform: linux/riscv64
+            output_name: riscv64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Export builder filesystem for ${{ matrix.output_name }}
+        id: export
+        run: |
+          set -eux
+          OUTDIR="out/${{ matrix.output_name }}"
+          mkdir -p "${OUTDIR}"
+
+          docker buildx build \
+            --platform=${{ matrix.platform }} \
+            --target=builder \
+            --build-arg VALKEY_VERSION=${{ needs.get-version.outputs.version }} \
+            --build-arg BUILD_RDMA=0 \
+            --output type=local,dest="${OUTDIR}" \
+            -f Dockerfile .
+          ls -la "${OUTDIR}" || true
+
+      - name: Prepare packaged binaries (naming schema)
+        id: prepare
+        run: |
+          set -eux
+          OUTDIR="out/${{ matrix.output_name }}"
+          RELDIR="release/${{ matrix.output_name }}"
+          mkdir -p "${RELDIR}"
+
+          SRC="${OUTDIR}/src"
+          if [ ! -d "${SRC}" ]; then
+            # Some builds may place work in / (rare). Try top-level
+            SRC="${OUTDIR}"
+          fi
+
+          for f in valkey-server valkey-cli valkey-benchmark valkey-check-aof valkey-check-rdb; do
+            if [ -f "${SRC}/${f}" ]; then
+              cp "${SRC}/${f}" "${RELDIR}/${f}-${{ matrix.output_name }}-linux"
+            fi
+          done
+
+          # Normalise permissions
+          chmod +x ${RELDIR}/* || true
+          ls -la "${RELDIR}" || true
+
+      - name: Upload artifacts for ${{ matrix.output_name }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-${{ matrix.output_name }}-linux
+          path: release/${{ matrix.output_name }}/*
+
+  create-release:
+    name: Create Release
+    needs: [get-version, build-and-push, export-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts (all arches)
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for arch in x86_64 aarch64 ppc64le s390x riscv64; do
+            if [ -d "artifacts/valkey-${arch}-linux" ]; then
+              cp artifacts/valkey-${arch}-linux/* release/ || true
+            fi
+          done
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.get-version.outputs.version }}
+          name: Valkey ${{ needs.get-version.outputs.version }}
+          body: |
+            Built from [valkey-io/valkey@${{ needs.get-version.outputs.version }}](https://github.com/valkey-io/valkey/releases/tag/${{ needs.get-version.outputs.version }})
+          files: release/*
+          draft: false
+          prerelease: false
