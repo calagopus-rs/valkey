@@ -190,7 +190,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.get-version.outputs.version }}
-          name: Valkey ${{ needs.get-version.outputs.version }}
+          name: ${{ needs.get-version.outputs.version }}
           body: |
             Built from [valkey-io/valkey@${{ needs.get-version.outputs.version }}](https://github.com/valkey-io/valkey/releases/tag/${{ needs.get-version.outputs.version }})
           files: release/*
