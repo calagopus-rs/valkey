@@ -1,5 +1,4 @@
-# Build and Release Valkey - builds inside Docker (Alpine builder) and pushes multi-arch images,
-# then extracts built binaries from the builder stage and uploads them as artifacts.
+# Build and Release Valkey - build multi-arch image then extract binaries from the pushed image
 name: Build and Release Valkey
 
 on:
@@ -16,6 +15,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   get-version:
     name: Get Valkey Version
@@ -23,7 +26,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Get latest Valkey version
+      - name: Determine Valkey version
         id: version
         run: |
           if [ -n "${{ inputs.valkey_version }}" ]; then
@@ -68,7 +71,7 @@ jobs:
             type=raw,value=${{ needs.get-version.outputs.version }}
             type=raw,value=latest
 
-      - name: Build and push multi-arch image (build happens inside Docker builder stage)
+      - name: Build and push multi-arch image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -84,11 +87,12 @@ jobs:
           cache-to: type=gha,mode=max
 
   export-binaries:
-    name: Export built binaries and upload artifacts
+    name: Extract binaries from pushed images and upload artifacts
     needs: build-and-push
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -105,56 +109,56 @@ jobs:
             output_name: riscv64
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Export builder filesystem for ${{ matrix.output_name }}
-        id: export
+      - name: Pull platform-specific image
+        id: pull
         run: |
           set -eux
-          OUTDIR="out/${{ matrix.output_name }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.get-version.outputs.version }}"
+          echo "Pulling ${IMAGE} for platform ${{ matrix.platform }}"
+          docker pull --platform=${{ matrix.platform }} "${IMAGE}"
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Create container and copy binaries
+        id: extract
+        run: |
+          set -eux
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.get-version.outputs.version }}"
+          OUTDIR="release/${{ matrix.output_name }}"
           mkdir -p "${OUTDIR}"
 
-          docker buildx build \
-            --platform=${{ matrix.platform }} \
-            --target=builder \
-            --build-arg VALKEY_VERSION=${{ needs.get-version.outputs.version }} \
-            --build-arg BUILD_RDMA=0 \
-            --output type=local,dest="${OUTDIR}" \
-            -f Dockerfile .
-          ls -la "${OUTDIR}" || true
+          CID=$(docker create --platform=${{ matrix.platform }} "${IMAGE}")
+          echo "created container ${CID}"
 
-      - name: Prepare packaged binaries (naming schema)
-        id: prepare
-        run: |
-          set -eux
-          OUTDIR="out/${{ matrix.output_name }}"
-          RELDIR="release/${{ matrix.output_name }}"
-          mkdir -p "${RELDIR}"
+          docker ls -la "${CID}:" || true
 
-          SRC="${OUTDIR}/src"
-          if [ ! -d "${SRC}" ]; then
-            # Some builds may place work in / (rare). Try top-level
-            SRC="${OUTDIR}"
-          fi
-
-          for f in valkey-server valkey-cli valkey-benchmark valkey-check-aof valkey-check-rdb; do
-            if [ -f "${SRC}/${f}" ]; then
-              cp "${SRC}/${f}" "${RELDIR}/${f}-${{ matrix.output_name }}-linux"
+          for BIN in valkey-server valkey-cli valkey-benchmark valkey-check-aof valkey-check-rdb; do
+            SRC="/usr/local/bin/${BIN}"
+            if docker cp "${CID}:${SRC}" "${OUTDIR}/${BIN}-${{ matrix.output_name }}-linux" 2>/dev/null; then
+              chmod +x "${OUTDIR}/${BIN}-${{ matrix.output_name }}-linux" || true
+              echo "Copied ${SRC}"
+            else
+              echo "Binary ${SRC} not found in image for platform ${{ matrix.platform }}, skipping"
             fi
           done
 
-          # Normalise permissions
-          chmod +x ${RELDIR}/* || true
-          ls -la "${RELDIR}" || true
+          docker rm "${CID}" >/dev/null || true
+          ls -la "${OUTDIR}" || true
+          echo "outdir=${OUTDIR}" >> $GITHUB_OUTPUT
 
-      - name: Upload artifacts for ${{ matrix.output_name }}
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: valkey-${{ matrix.output_name }}-linux
@@ -180,6 +184,7 @@ jobs:
               cp artifacts/valkey-${arch}-linux/* release/ || true
             fi
           done
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
