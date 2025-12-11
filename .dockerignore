@@ -1,0 +1,6 @@
+.git
+.github
+*.md
+artifacts
+dist
+valkey-src

@@ -1,0 +1,217 @@
+name: Build and Release Valkey
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      valkey_version:
+        description: 'Valkey version to build (e.g., 8.0.0). Leave empty to fetch latest.'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  get-version:
+    name: Get Valkey Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Get latest Valkey version
+        id: version
+        run: |
+          if [ -n "${{ inputs.valkey_version }}" ]; then
+            VERSION="${{ inputs.valkey_version }}"
+          else
+            # Fetch latest release from valkey-io/valkey
+            VERSION=$(curl -s https://api.github.com/repos/valkey-io/valkey/releases/latest | jq -r .tag_name)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building Valkey version: ${VERSION}"
+
+  build-binaries:
+    name: Build ${{ matrix.arch }}
+    needs: get-version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-linux-gnu
+            output_name: x86_64
+          - arch: arm64
+            target: aarch64-linux-gnu
+            output_name: aarch64
+          - arch: ppc64le
+            target: powerpc64le-linux-gnu
+            output_name: ppc64le
+          - arch: s390x
+            target: s390x-linux-gnu
+            output_name: s390x
+          - arch: riscv64
+            target: riscv64-linux-gnu
+            output_name: riscv64
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            tcl \
+            wget
+
+      - name: Download Valkey source
+        run: |
+          wget https://github.com/valkey-io/valkey/archive/refs/tags/${{ needs.get-version.outputs.version }}.tar.gz
+          tar -xzf ${{ needs.get-version.outputs.version }}.tar.gz
+          mv valkey-* valkey-src
+
+      - name: Set up cross-compilation (non-amd64)
+        if: matrix.arch != 'amd64'
+        run: |
+          sudo apt-get install -y \
+            gcc-${{ matrix.target }} \
+            g++-${{ matrix.target }} \
+            crossbuild-essential-${{ matrix.arch }}
+
+      - name: Build Valkey
+        working-directory: valkey-src
+        run: |
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            make -j$(nproc) BUILD_TLS=yes
+          else
+            # Cross-compilation
+            export CC=${{ matrix.target }}-gcc
+            export CXX=${{ matrix.target }}-g++
+            export AR=${{ matrix.target }}-ar
+            export RANLIB=${{ matrix.target }}-ranlib
+            make -j$(nproc) BUILD_TLS=yes
+          fi
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cd valkey-src/src
+
+          # Main binaries
+          cp valkey-server ../../dist/valkey-server-${{ matrix.output_name }}-linux
+          cp valkey-cli ../../dist/valkey-cli-${{ matrix.output_name }}-linux
+          cp valkey-benchmark ../../dist/valkey-benchmark-${{ matrix.output_name }}-linux
+          cp valkey-check-aof ../../dist/valkey-check-aof-${{ matrix.output_name }}-linux
+          cp valkey-check-rdb ../../dist/valkey-check-rdb-${{ matrix.output_name }}-linux
+
+          # Strip binaries to reduce size
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            strip ../../dist/valkey-*
+          else
+            ${{ matrix.target }}-strip ../../dist/valkey-* || true
+          fi
+
+          cd ../../dist
+          chmod +x valkey-*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-${{ matrix.output_name }}-linux
+          path: dist/valkey-*-${{ matrix.output_name }}-linux
+
+  build-docker:
+    name: Build Docker Images
+    needs: [get-version, build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare binaries for Docker
+        run: |
+          mkdir -p docker-bins
+          for arch in x86_64 aarch64 ppc64le s390x riscv64; do
+            mkdir -p docker-bins/${arch}
+            cp artifacts/valkey-${arch}-linux/valkey-*-${arch}-linux docker-bins/${arch}/
+            chmod +x docker-bins/${arch}/*
+          done
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.get-version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/ppc64le,linux/s390x,linux/riscv64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VALKEY_VERSION=${{ needs.get-version.outputs.version }}
+
+  create-release:
+    name: Create Release
+    needs: [get-version, build-binaries, build-docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for arch in x86_64 aarch64 ppc64le s390x riscv64; do
+            cp artifacts/valkey-${arch}-linux/valkey-*-${arch}-linux release/
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.get-version.outputs.version }}
+          name: Valkey ${{ needs.get-version.outputs.version }}
+          body: |
+            Built from [valkey-io/valkey@${{ needs.get-version.outputs.version }}](https://github.com/valkey-io/valkey/releases/tag/${{ needs.get-version.outputs.version }})
+          files: release/*
+          draft: false
+          prerelease: false

@@ -1,0 +1,16 @@
+# Build artifacts
+dist/
+artifacts/
+docker-bins/
+valkey-src/
+
+# Temporary files
+*.log
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
