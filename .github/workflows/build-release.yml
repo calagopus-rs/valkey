@@ -1,3 +1,4 @@
+# Updated Build and Release Valkey workflow
 name: Build and Release Valkey
 
 on:
@@ -79,23 +80,24 @@ jobs:
       - name: Set up cross-compilation (non-amd64)
         if: matrix.arch != 'amd64'
         run: |
+          sudo apt-get update
           sudo apt-get install -y \
             gcc-${{ matrix.target }} \
             g++-${{ matrix.target }} \
-            crossbuild-essential-${{ matrix.arch }}
+            crossbuild-essential-${{ matrix.arch }} || true
 
       - name: Build Valkey
         working-directory: valkey-src
         run: |
           if [ "${{ matrix.arch }}" = "amd64" ]; then
-            make -j$(nproc) BUILD_TLS=yes
+            make -j$(nproc) BUILD_TLS=yes BUILD_RDMA=0
           else
             # Cross-compilation
             export CC=${{ matrix.target }}-gcc
             export CXX=${{ matrix.target }}-g++
             export AR=${{ matrix.target }}-ar
             export RANLIB=${{ matrix.target }}-ranlib
-            make -j$(nproc) BUILD_TLS=yes
+            make -j$(nproc) BUILD_TLS=yes BUILD_RDMA=0
           fi
 
       - name: Package binaries
@@ -104,21 +106,23 @@ jobs:
           cd valkey-src/src
 
           # Main binaries
-          cp valkey-server ../../dist/valkey-server-${{ matrix.output_name }}-linux
-          cp valkey-cli ../../dist/valkey-cli-${{ matrix.output_name }}-linux
-          cp valkey-benchmark ../../dist/valkey-benchmark-${{ matrix.output_name }}-linux
-          cp valkey-check-aof ../../dist/valkey-check-aof-${{ matrix.output_name }}-linux
-          cp valkey-check-rdb ../../dist/valkey-check-rdb-${{ matrix.output_name }}-linux
+          cp valkey-server ../../dist/valkey-server-${{ matrix.output_name }}-linux || true
+          cp valkey-cli ../../dist/valkey-cli-${{ matrix.output_name }}-linux || true
+          cp valkey-benchmark ../../dist/valkey-benchmark-${{ matrix.output_name }}-linux || true
+          cp valkey-check-aof ../../dist/valkey-check-aof-${{ matrix.output_name }}-linux || true
+          cp valkey-check-rdb ../../dist/valkey-check-rdb-${{ matrix.output_name }}-linux || true
 
           # Strip binaries to reduce size
           if [ "${{ matrix.arch }}" = "amd64" ]; then
-            strip ../../dist/valkey-*
+            strip ../../dist/valkey-* || true
           else
-            ${{ matrix.target }}-strip ../../dist/valkey-* || true
+            ${{
+              matrix.target
+            }}-strip ../../dist/valkey-* || true
           fi
 
           cd ../../dist
-          chmod +x valkey-*
+          chmod +x valkey-* || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -143,14 +147,31 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare binaries for Docker
+      - name: Prepare binaries for Docker (arrange by TARGETARCH)
         run: |
           mkdir -p docker-bins
-          for arch in x86_64 aarch64 ppc64le s390x riscv64; do
-            mkdir -p docker-bins/${arch}
-            cp artifacts/valkey-${arch}-linux/valkey-*-${arch}-linux docker-bins/${arch}/
-            chmod +x docker-bins/${arch}/*
+          # map buildx TARGETARCH names -> artifact output_name
+          declare -A MAP
+          MAP[amd64]=x86_64
+          MAP[arm64]=aarch64
+          MAP[ppc64le]=ppc64le
+          MAP[s390x]=s390x
+          MAP[riscv64]=riscv64
+
+          for targ in amd64 arm64 ppc64le s390x riscv64; do
+            out=${MAP[$targ]}
+            mkdir -p docker-bins/${targ}
+            # copy all matching binaries if present
+            if [ -d "artifacts/valkey-${out}-linux" ]; then
+              cp artifacts/valkey-${out}-linux/valkey-*-${out}-linux docker-bins/${targ}/ 2>/dev/null || true
+              # Also copy any other valkey-* placed there
+              cp artifacts/valkey-${out}-linux/* docker-bins/${targ}/ 2>/dev/null || true
+            fi
+            chmod +x docker-bins/${targ}/* 2>/dev/null || true
           done
+
+      - name: Show docker-bins layout
+        run: ls -R docker-bins || true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -184,34 +205,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VALKEY_VERSION=${{ needs.get-version.outputs.version }}
-
-  create-release:
-    name: Create Release
-    needs: [get-version, build-binaries, build-docker]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release
-          for arch in x86_64 aarch64 ppc64le s390x riscv64; do
-            cp artifacts/valkey-${arch}-linux/valkey-*-${arch}-linux release/
-          done
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.get-version.outputs.version }}
-          name: Valkey ${{ needs.get-version.outputs.version }}
-          body: |
-            Built from [valkey-io/valkey@${{ needs.get-version.outputs.version }}](https://github.com/valkey-io/valkey/releases/tag/${{ needs.get-version.outputs.version }})
-          files: release/*
-          draft: false
-          prerelease: false

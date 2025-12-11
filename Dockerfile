@@ -1,62 +1,30 @@
-FROM debian:bookworm-slim
+FROM alpine:3.18 AS builder
 
 ARG TARGETARCH
-ARG VALKEY_VERSION
+WORKDIR /out
 
-LABEL org.opencontainers.image.title="Valkey"
-LABEL org.opencontainers.image.description="Multi-architecture Valkey builds"
-LABEL org.opencontainers.image.version="${VALKEY_VERSION}"
-LABEL org.opencontainers.image.source="https://github.com/calagopus-rs/valkey"
-LABEL org.opencontainers.image.licenses="BSD-3-Clause"
+COPY docker-bins/${TARGETARCH}/ /out/
 
-# Install runtime dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libssl3 \
-    tzdata && \
-    rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    for f in /out/*; do \
+      base=$(basename "$f"); \
+      case "$base" in \
+        valkey-server-*-linux) mv "$f" /out/valkey-server ;; \
+        valkey-cli-*-linux) mv "$f" /out/valkey-cli ;; \
+        valkey-benchmark-*-linux) mv "$f" /out/valkey-benchmark ;; \
+        valkey-check-aof-*-linux) mv "$f" /out/valkey-check-aof ;; \
+        valkey-check-rdb-*-linux) mv "$f" /out/valkey-check-rdb ;; \
+        *) : ;; \
+      esac; \
+    done; \
+    chmod +x /out/* || true
 
-# Create valkey user and group
-RUN groupadd -r -g 999 valkey && \
-    useradd -r -g valkey -u 999 -m -d /data valkey
+FROM alpine:3.18 AS runtime
 
-# Map Docker platform to our architecture naming
-# amd64 -> x86_64, arm64 -> aarch64, etc.
-RUN case "${TARGETARCH}" in \
-    "amd64")   echo "x86_64"   > /tmp/arch ;; \
-    "arm64")   echo "aarch64"  > /tmp/arch ;; \
-    "ppc64le") echo "ppc64le"  > /tmp/arch ;; \
-    "s390x")   echo "s390x"    > /tmp/arch ;; \
-    "riscv64") echo "riscv64"  > /tmp/arch ;; \
-    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac
+RUN apk add --no-cache ca-certificates
 
-# Copy pre-built binaries for the target architecture
-COPY docker-bins/$(cat /tmp/arch)/* /usr/local/bin/
+COPY --from=builder /out/ /usr/local/bin/
 
-# Create symlinks with standard names
-RUN cd /usr/local/bin && \
-    ARCH=$(cat /tmp/arch) && \
-    ln -s valkey-server-${ARCH}-linux valkey-server && \
-    ln -s valkey-cli-${ARCH}-linux valkey-cli && \
-    ln -s valkey-benchmark-${ARCH}-linux valkey-benchmark && \
-    ln -s valkey-check-aof-${ARCH}-linux valkey-check-aof && \
-    ln -s valkey-check-rdb-${ARCH}-linux valkey-check-rdb && \
-    rm /tmp/arch
-
-# Create directories
-RUN mkdir -p /data /etc/valkey && \
-    chown -R valkey:valkey /data /etc/valkey
-
-WORKDIR /data
-
-VOLUME /data
-
-# Expose default Valkey port
 EXPOSE 6379
 
-USER valkey
-
-ENTRYPOINT ["valkey-server"]
-CMD []
+ENTRYPOINT ["/usr/local/bin/valkey-server"]
