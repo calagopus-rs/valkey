@@ -1,4 +1,3 @@
-# Updated Build and Release Valkey workflow
 name: Build and Release Valkey
 
 on:
@@ -21,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Get latest Valkey version
         id: version
@@ -29,149 +27,22 @@ jobs:
           if [ -n "${{ inputs.valkey_version }}" ]; then
             VERSION="${{ inputs.valkey_version }}"
           else
-            # Fetch latest release from valkey-io/valkey
             VERSION=$(curl -s https://api.github.com/repos/valkey-io/valkey/releases/latest | jq -r .tag_name)
           fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building Valkey version: ${VERSION}"
 
-  build-binaries:
-    name: Build ${{ matrix.arch }}
+  build-and-push:
+    name: Build multi-arch Docker images and push
     needs: get-version
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-linux-gnu
-            output_name: x86_64
-          - arch: arm64
-            target: aarch64-linux-gnu
-            output_name: aarch64
-          - arch: ppc64le
-            target: powerpc64le-linux-gnu
-            output_name: ppc64le
-          - arch: s390x
-            target: s390x-linux-gnu
-            output_name: s390x
-          - arch: riscv64
-            target: riscv64-linux-gnu
-            output_name: riscv64
-
-    steps:
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            tcl \
-            wget
-
-      - name: Download Valkey source
-        run: |
-          wget https://github.com/valkey-io/valkey/archive/refs/tags/${{ needs.get-version.outputs.version }}.tar.gz
-          tar -xzf ${{ needs.get-version.outputs.version }}.tar.gz
-          mv valkey-* valkey-src
-
-      - name: Set up cross-compilation (non-amd64)
-        if: matrix.arch != 'amd64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-${{ matrix.target }} \
-            g++-${{ matrix.target }} \
-            crossbuild-essential-${{ matrix.arch }} || true
-
-      - name: Build Valkey
-        working-directory: valkey-src
-        run: |
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
-            make -j$(nproc) BUILD_TLS=yes BUILD_RDMA=0
-          else
-            # Cross-compilation
-            export CC=${{ matrix.target }}-gcc
-            export CXX=${{ matrix.target }}-g++
-            export AR=${{ matrix.target }}-ar
-            export RANLIB=${{ matrix.target }}-ranlib
-            make -j$(nproc) BUILD_TLS=yes BUILD_RDMA=0
-          fi
-
-      - name: Package binaries
-        run: |
-          mkdir -p dist
-          cd valkey-src/src
-
-          # Main binaries
-          cp valkey-server ../../dist/valkey-server-${{ matrix.output_name }}-linux || true
-          cp valkey-cli ../../dist/valkey-cli-${{ matrix.output_name }}-linux || true
-          cp valkey-benchmark ../../dist/valkey-benchmark-${{ matrix.output_name }}-linux || true
-          cp valkey-check-aof ../../dist/valkey-check-aof-${{ matrix.output_name }}-linux || true
-          cp valkey-check-rdb ../../dist/valkey-check-rdb-${{ matrix.output_name }}-linux || true
-
-          # Strip binaries to reduce size
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
-            strip ../../dist/valkey-* || true
-          else
-            ${{
-              matrix.target
-            }}-strip ../../dist/valkey-* || true
-          fi
-
-          cd ../../dist
-          chmod +x valkey-* || true
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: valkey-${{ matrix.output_name }}-linux
-          path: dist/valkey-*-${{ matrix.output_name }}-linux
-
-  build-docker:
-    name: Build Docker Images
-    needs: [get-version, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare binaries for Docker (arrange by TARGETARCH)
-        run: |
-          mkdir -p docker-bins
-          # map buildx TARGETARCH names -> artifact output_name
-          declare -A MAP
-          MAP[amd64]=x86_64
-          MAP[arm64]=aarch64
-          MAP[ppc64le]=ppc64le
-          MAP[s390x]=s390x
-          MAP[riscv64]=riscv64
-
-          for targ in amd64 arm64 ppc64le s390x riscv64; do
-            out=${MAP[$targ]}
-            mkdir -p docker-bins/${targ}
-            # copy all matching binaries if present
-            if [ -d "artifacts/valkey-${out}-linux" ]; then
-              cp artifacts/valkey-${out}-linux/valkey-*-${out}-linux docker-bins/${targ}/ 2>/dev/null || true
-              # Also copy any other valkey-* placed there
-              cp artifacts/valkey-${out}-linux/* docker-bins/${targ}/ 2>/dev/null || true
-            fi
-            chmod +x docker-bins/${targ}/* 2>/dev/null || true
-          done
-
-      - name: Show docker-bins layout
-        run: ls -R docker-bins || true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -179,7 +50,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -195,13 +66,17 @@ jobs:
             type=raw,value=${{ needs.get-version.outputs.version }}
             type=raw,value=latest
 
-      - name: Build and push Docker image
+      - name: Build and push multi-arch image (build happens inside Docker builder stage)
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/ppc64le,linux/s390x,linux/riscv64
+          file: ./Dockerfile
           push: true
+          platforms: linux/amd64,linux/arm64,linux/ppc64le,linux/s390x,linux/riscv64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VALKEY_VERSION=${{ needs.get-version.outputs.version }}
+            BUILD_RDMA=0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

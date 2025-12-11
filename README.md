@@ -20,20 +20,6 @@ docker pull ghcr.io/calagopus-rs/valkey:latest
 docker run -d -p 6379:6379 ghcr.io/calagopus-rs/valkey:latest
 ```
 
-## Binary Usage
-
-Download pre-built binaries from the [releases page](https://github.com/calagopus-rs/valkey/releases).
-
-### Available Binaries
-
-Each release includes the following binaries for each architecture:
-
-- `valkey-server-{arch}-linux` - Valkey server
-- `valkey-cli-{arch}-linux` - Command-line client
-- `valkey-benchmark-{arch}-linux` - Benchmarking tool
-- `valkey-check-aof-{arch}-linux` - AOF file checker
-- `valkey-check-rdb-{arch}-linux` - RDB file checker
-
 ## Build Schedule
 
 - Automatic builds run every Sunday at 00:00 UTC
