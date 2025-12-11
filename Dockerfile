@@ -1,8 +1,7 @@
 ARG VALKEY_VERSION
 ARG BUILD_RDMA=0
-ARG ALPINE_VERSION=3.18
 
-FROM --platform=$TARGETPLATFORM alpine:${ALPINE_VERSION} AS builder
+FROM --platform=$TARGETPLATFORM alpine:latest AS builder
 
 ARG VALKEY_VERSION
 ARG BUILD_RDMA
@@ -46,7 +45,7 @@ RUN set -eux; \
       if [ -f "$f" ]; then strip "$f" || true; fi; \
     done
 
-FROM alpine:${ALPINE_VERSION} AS runtime
+FROM alpine:latest AS runtime
 
 RUN apk add --no-cache ca-certificates
 
