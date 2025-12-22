@@ -14,10 +14,10 @@ Automated multi-architecture builds of [Valkey](https://github.com/valkey-io/val
 
 ```bash
 # Pull the latest version
-docker pull ghcr.io/calagopus-rs/valkey:latest
+docker pull ghcr.io/calagopus/valkey:latest
 
 # Run Valkey
-docker run -d -p 6379:6379 ghcr.io/calagopus-rs/valkey:latest
+docker run -d -p 6379:6379 ghcr.io/calagopus/valkey:latest
 ```
 
 ## Build Schedule
@@ -29,12 +29,12 @@ docker run -d -p 6379:6379 ghcr.io/calagopus-rs/valkey:latest
 ## Architecture Mapping
 
 | Docker Platform | Binary Name | Common Name |
-|----------------|-------------|-------------|
-| linux/amd64    | x86_64      | Intel/AMD   |
-| linux/arm64    | aarch64     | ARM 64-bit  |
-| linux/ppc64le  | ppc64le     | PowerPC     |
-| linux/s390x    | s390x       | IBM Z       |
-| linux/riscv64  | riscv64     | RISC-V      |
+|-----------------|-------------|-------------|
+| linux/amd64     | x86_64      | Intel/AMD   |
+| linux/arm64     | aarch64     | ARM 64-bit  |
+| linux/ppc64le   | ppc64le     | PowerPC     |
+| linux/s390x     | s390x       | IBM Z       |
+| linux/riscv64   | riscv64     | RISC-V      |
 
 ## Contributing
 
