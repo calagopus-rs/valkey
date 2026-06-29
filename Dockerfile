@@ -34,6 +34,17 @@ RUN set -eux; \
     tar -xzf /tmp/valkey.tar.gz --strip-components=1 -C /src
 
 RUN set -eux; \
+    extraJemallocConfigureFlags=""; \
+    case "$(apk --print-arch)" in \
+      x86_64 | x86 | i386) extraJemallocConfigureFlags="--with-lg-page=12" ;; \
+      *) extraJemallocConfigureFlags="--with-lg-page=16" ;; \
+    esac; \
+    extraJemallocConfigureFlags="$extraJemallocConfigureFlags --with-lg-hugepage=21"; \
+    grep -F 'cd jemalloc && ./configure ' /src/deps/Makefile; \
+    sed -ri 's!cd jemalloc && ./configure !&'"$extraJemallocConfigureFlags"' !' /src/deps/Makefile; \
+    grep -F 'cd jemalloc && ./configure ' /src/deps/Makefile
+
+RUN set -eux; \
     uname -a || true; \
     NPROC=$(getconf _NPROCESSORS_ONLN || echo 1); \
     export VALKEY_DEBUG_BUILD=0; \
